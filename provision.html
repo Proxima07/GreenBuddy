@@ -59,10 +59,9 @@ $('btnConnect').onclick = async () => {
       optionalServices: [NUS]
     });
     setStatus('連線中…');
-    const server = await dev.gatt.connect();
-    const svc = await server.getPrimaryService(NUS);
-    rxChar = await svc.getCharacteristic(RX);
-    const txChar = await svc.getCharacteristic(TX);
+    const chars = await connectWithRetry(dev, 3);
+    rxChar = chars.rx;
+    const txChar = chars.tx;
     await txChar.startNotifications();
     txChar.addEventListener('characteristicvaluechanged', e => {
       rxBuf += new TextDecoder().decode(e.target.value);
@@ -94,6 +93,24 @@ $('btnSave').onclick = async () => {
   setStatus('傳送設定,裝置測試連線中(約 15 秒)…');
   await send({ cmd: 'save', ssid: ssid, pass: $('pwd').value });
 };
+
+async function connectWithRetry(dev, tries) {
+  for (let i = 1; i <= tries; i++) {
+    try {
+      setStatus(i === 1 ? '連線中…' : '連線不穩,重試中 (' + i + '/' + tries + ')…');
+      const server = await dev.gatt.connect();
+      await new Promise(r => setTimeout(r, 600));   // 等 ESP32 的 GATT 服務就緒
+      const svc = await server.getPrimaryService(NUS);
+      const rx = await svc.getCharacteristic(RX);
+      const tx = await svc.getCharacteristic(TX);
+      return { rx: rx, tx: tx };
+    } catch (e) {
+      try { dev.gatt.disconnect(); } catch (_) {}
+      if (i === tries) throw e;
+      await new Promise(r => setTimeout(r, 800));
+    }
+  }
+}
 
 async function send(obj) {
   const data = new TextEncoder().encode(JSON.stringify(obj) + '\n');
