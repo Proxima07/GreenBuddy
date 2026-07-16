@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>綠盆友 WiFi 設定</title>
+<style>
+  body{font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;max-width:420px;margin:0 auto;padding:24px 16px;background:#f4f7f2;color:#2d3a2e}
+  h1{font-size:22px;color:#3d6b35}
+  h3{font-size:16px}
+  button{background:#4a8c3f;color:#fff;border:0;border-radius:10px;padding:12px 20px;font-size:16px;cursor:pointer;width:100%;margin-top:8px}
+  button.secondary{background:#e8efe4;color:#3d6b35}
+  .net{display:flex;justify-content:space-between;align-items:center;background:#fff;border:1px solid #dde5d8;border-radius:10px;padding:12px 14px;margin:8px 0;cursor:pointer}
+  .net:active{border-color:#4a8c3f;background:#f0f6ec}
+  input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #cdd8c6;border-radius:10px;font-size:16px;margin:10px 0}
+  #status{margin-top:16px;padding:10px 12px;border-radius:8px;background:#fff;min-height:20px;font-size:14px}
+  #status.ok{background:#e4f3df;color:#2f6627}
+  #status.err{background:#fbe9e7;color:#a33a2a}
+  .hint{font-size:13px;color:#7a8a74}
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+<h1>綠盆友裝置設定</h1>
+
+<div id="step1">
+  <p>按下方按鈕,選擇名稱為 <b>GreenBuddy-XXXX</b> 的裝置。</p>
+  <button id="btnConnect">連接裝置</button>
+  <p class="hint">需使用支援 Web Bluetooth 的瀏覽器:Android 或電腦版的 Chrome / Edge。iOS 的 Safari 與 Chrome 皆不支援。頁面必須透過 HTTPS 或 localhost 開啟。</p>
+</div>
+
+<div id="step2" hidden>
+  <h3>選擇 WiFi 網路</h3>
+  <div id="list"><p class="hint">掃描中…</p></div>
+  <button id="btnRescan" class="secondary">重新掃描</button>
+  <div id="form" hidden>
+    <p>已選擇:<b id="chosen"></b></p>
+    <input type="password" id="pwd" placeholder="輸入 WiFi 密碼" autocomplete="off">
+    <button id="btnSave">儲存並連線</button>
+  </div>
+</div>
+
+<div id="status"></div>
+
+<script>
+const NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const RX  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+let rxChar = null, rxBuf = '';
+
+const $ = id => document.getElementById(id);
+const setStatus = (msg, cls = '') => { const s = $('status'); s.textContent = msg; s.className = cls; };
+
+$('btnConnect').onclick = async () => {
+  if (!navigator.bluetooth) { setStatus('此瀏覽器不支援 Web Bluetooth,請改用 Android/電腦版 Chrome', 'err'); return; }
+  try {
+    const dev = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'GreenBuddy' }],
+      optionalServices: [NUS]
+    });
+    setStatus('連線中…');
+    const server = await dev.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    rxChar = await svc.getCharacteristic(RX);
+    const txChar = await svc.getCharacteristic(TX);
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', e => {
+      rxBuf += new TextDecoder().decode(e.target.value);
+      let i;
+      while ((i = rxBuf.indexOf('\n')) >= 0) {
+        const line = rxBuf.slice(0, i);
+        rxBuf = rxBuf.slice(i + 1);
+        try { handle(JSON.parse(line)); } catch (_) {}
+      }
+    });
+    dev.addEventListener('gattserverdisconnected', () => setStatus('裝置已斷線(配網成功會自動重啟,屬正常現象)'));
+    $('step1').hidden = true;
+    $('step2').hidden = false;
+    setStatus('已連接,掃描 WiFi 中…');
+    await send({ cmd: 'scan' });
+  } catch (e) {
+    setStatus('連接失敗:' + e.message, 'err');
+  }
+};
+
+$('btnRescan').onclick = async () => {
+  $('list').innerHTML = '<p class="hint">掃描中…</p>';
+  await send({ cmd: 'scan' });
+};
+
+$('btnSave').onclick = async () => {
+  const ssid = $('chosen').textContent;
+  if (!ssid) return;
+  setStatus('傳送設定,裝置測試連線中(約 15 秒)…');
+  await send({ cmd: 'save', ssid: ssid, pass: $('pwd').value });
+};
+
+async function send(obj) {
+  const data = new TextEncoder().encode(JSON.stringify(obj) + '\n');
+  for (let i = 0; i < data.length; i += 20) {
+    const chunk = data.slice(i, i + 20);
+    try { await rxChar.writeValueWithoutResponse(chunk); }
+    catch (_) { await rxChar.writeValue(chunk); }
+    await new Promise(r => setTimeout(r, 30));
+  }
+}
+
+function handle(msg) {
+  if (msg.t === 'scan') {
+    const list = $('list');
+    list.innerHTML = '';
+    if (!msg.list.length) { list.innerHTML = '<p class="hint">沒掃到網路,請重新掃描</p>'; return; }
+    msg.list.forEach(n => {
+      const div = document.createElement('div');
+      div.className = 'net';
+      const bars = n.r > -55 ? '▂▄▆█' : n.r > -70 ? '▂▄▆_' : n.r > -80 ? '▂▄__' : '▂___';
+      div.innerHTML = '<span>' + (n.sec ? '🔒 ' : '') + n.s + '</span><span style="color:#7a8a74">' + bars + '</span>';
+      div.onclick = () => { $('chosen').textContent = n.s; $('form').hidden = false; $('pwd').focus(); };
+      list.appendChild(div);
+    });
+    setStatus('請選擇要連接的網路');
+  } else if (msg.t === 'status') {
+    if (msg.ok === true) setStatus('✅ ' + msg.msg + '(IP: ' + msg.ip + ')裝置之後將自動連 WiFi 上傳數據,藍牙關閉。', 'ok');
+    else if (msg.ok === false) setStatus('❌ ' + msg.msg, 'err');
+    else setStatus(msg.msg);
+  }
+}
+</script>
+</body>
+</html>
